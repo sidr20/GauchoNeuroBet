@@ -76,10 +76,12 @@ def get_player_prediction(player_name, stat_to_check):
         df["Rolling_PTS"] = df["PTS"].rolling(window=3, min_periods=1).mean()
         df["Rolling_AST"] = df["AST"].rolling(window=3, min_periods=1).mean()
         df["Rolling_REB"] = df["REB"].rolling(window=3, min_periods=1).mean()
-        df['HOME_GAME'] = df['MATCHUP'].apply(lambda x: 1 if "vs." in x else 0)
+        df['HOME_GAME'] = df['MATCHUP'].apply(lambda x: 1 if isinstance(x, str) and "vs." in x else 0)
         df['Back_to_Back'] = df['GAME_DATE'].diff().dt.days.fillna(0).apply(lambda x: 1 if x == 1 else 0)
 
         def extract_opponent(matchup):
+            if not isinstance(matchup, str):
+                return None
             try:
                 part = matchup.split("vs. ")[1] if "vs." in matchup else matchup.split("@ ")[1]
                 return team_abbrev_to_name.get(part, part)
