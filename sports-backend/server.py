@@ -154,7 +154,7 @@ def get_player_prediction(player_name, stat_to_check):
         model.compile(optimizer='adam', loss='mae')
         
         print(f"Training in progress...")
-        model.fit(X_train_scaled, y_train, epochs=100, batch_size=16, verbose=0)
+        model.fit(X_train_scaled, y_train, epochs=75, batch_size=16, verbose=0)
         print("Training complete. Caching model.")
         SESSION_MODELS[stat_to_check] = model
         SESSION_SCALERS[stat_to_check] = scaler
@@ -170,7 +170,7 @@ def get_player_prediction(player_name, stat_to_check):
     prediction_data = pd.DataFrame(games, columns=CORRECT_COLUMNS)
     prediction_data = feature_engineer(prediction_data)
     
-    next_game_features = prediction_data[FEATURES_LIST].iloc[-10:].mean().values.reshape(1, -1)
+    next_game_features = prediction_data[FEATURES_LIST].iloc[-7:].mean().values.reshape(1, -1)
     next_game_features = np.nan_to_num(next_game_features)
     next_game_features_scaled = scaler.transform(next_game_features)
     predicted_stat = model.predict(next_game_features_scaled)[0][0]

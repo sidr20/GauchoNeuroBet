@@ -141,7 +141,7 @@ data[features] = data[features].fillna(0)
 # Prepare training data
 X = data[features]
 y = data[target]
-
+ 
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 
@@ -166,7 +166,7 @@ model = Sequential([
 
 model.compile(optimizer='adam', loss='mae', metrics=['mae'])
 
-model.fit(X_train, y_train, epochs=100, batch_size=16, verbose=1, validation_data=(X_test, y_test))
+model.fit(X_train, y_train, epochs=75, batch_size=16, verbose=1, validation_data=(X_test, y_test))
 
 y_pred = model.predict(X_test)
 mae = mean_absolute_error(y_test, y_pred)
