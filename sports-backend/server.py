@@ -113,7 +113,7 @@ def get_player_prediction(player_name, stat_to_check):
         if "TEAM_NAME_y" in df.columns: df = df.drop(columns=["TEAM_NAME_y"])
         if "TEAM_NAME_x" in df.columns: df = df.rename(columns={'TEAM_NAME_x': 'TEAM_NAME'})
         
-        df = df.fillna(method='ffill').fillna(method='bfill')
+        df = df.ffill().bfill()
         return df
 
     # Check Cache First
