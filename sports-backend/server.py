@@ -15,6 +15,7 @@ import warnings
 app = Flask(__name__)
 CORS(app)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['TF_USE_LEGACY_KERAS']  = '1'
 
 # --- In-Memory Cache for Models and Scalers ---
 SESSION_MODELS = {}
