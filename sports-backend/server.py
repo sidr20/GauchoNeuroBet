@@ -1,27 +1,26 @@
 # Save this file as server.py
-# Final version with scoping fix for team_name_replacements.
+# pyrefly: ignore [missing-import]
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import pandas as pd
 import numpy as np
-import tensorflow as tf
+# pyrefly: ignore [missing-import]
+import xgboost as xgb
 from sklearn.preprocessing import StandardScaler
 from nba_api.stats.static import players, teams
-from nba_api.stats.endpoints import leaguegamefinder
-import os
+from nba_api.stats.endpoints import leaguegamefinder, scoreboardv3
+from datetime import datetime
 import warnings
 
 # --- Important backend setup ---
 app = Flask(__name__)
 CORS(app)
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-os.environ['TF_USE_LEGACY_KERAS']  = '1'
 
 # --- In-Memory Cache for Models and Scalers ---
 SESSION_MODELS = {}
 SESSION_SCALERS = {}
 
-print("--- Server is running with Full Feature Engineering and Scoping Fix. ---")
+print("--- Server is running with XGBoost, Advanced Features, and Live Context. ---")
 
 # --- Load shared static data ---
 print("Loading static API and CSV data...")
@@ -40,15 +39,56 @@ except FileNotFoundError:
 
 print("All static data loaded.")
 
-
 CORRECT_COLUMNS = ["SEASON_ID", "TEAM_ID", "TEAM_ABBREVIATION", "TEAM_NAME", "GAME_ID", "GAME_DATE",
                    "MATCHUP", "WL", "MIN", "PTS", "FGM", "FGA", "FG_PCT", "FG3M", "FG3A", "FG3_PCT",
                    "FTM", "FTA", "FT_PCT", "OREB", "DREB", "REB", "AST", "STL", "BLK", "TO", "PF", "PLUS_MINUS"]
 
-FEATURES_LIST = ["Rolling_PTS", "Rolling_AST", "Rolling_REB", "MIN", "FGM", "FGA", "FG_PCT", "FG3M", "FG3A", "FG3_PCT",
-                 "FTM", "FTA", "FT_PCT", "OREB", "DREB", "STL", "BLK", "TO", "PF", "PLUS_MINUS", "PTS_lag1", "AST_lag1", "REB_lag1", 
-                 "HOME_GAME", "Back_to_Back", "OPP_E_DEF_RATING", "OPP_TEAM_STL", "OPP_TEAM_BLK", "OPP_TEAM_WIN_PCT"]
+# UPDATED: Added new advanced features, removed basic 'Back_to_Back' in favor of fatigue metrics
+FEATURES_LIST = ["Rolling_PTS", "Rolling_AST", "Rolling_REB", 
+                 "Rolling_MIN", "Rolling_FGM", "Rolling_FGA", "Rolling_FG3M", "Rolling_FG3A",
+                 "Rolling_FTM", "Rolling_FTA", "Rolling_STL", "Rolling_BLK", "Rolling_TO", 
+                 "PTS_lag1", "AST_lag1", "REB_lag1", "MIN_lag1", "FGA_lag1",
+                 "HOME_GAME", "OPP_E_DEF_RATING", "OPP_TEAM_STL", "OPP_TEAM_BLK", "OPP_TEAM_WIN_PCT",
+                 "Weighted_PTS_Form", "PTS_Variance_5g", "Days_Rest", "Is_Fatigued", "Is_Well_Rested", "Home_Advantage_Multiplier"]
 
+
+# --- Helper: Get Tonight's Game Context ---
+# --- Helper: Get Tonight's Game Context ---
+def get_tonights_context(team_id, last_game_date):
+    today = datetime.today()
+    last_game = pd.to_datetime(last_game_date)
+    days_rest = (today - last_game).days
+    
+    # Use ScoreboardV3 with explicit game date
+    board = scoreboardv3.ScoreboardV3(game_date=today.strftime('%Y-%m-%d'))
+    games = board.get_dict()['scoreboard']['games']
+    
+    is_home_game = 0
+    opponent_id = None
+    
+    for game in games:
+        home_team_id = game['homeTeam']['teamId']
+        away_team_id = game['awayTeam']['teamId']
+        
+        if team_id == home_team_id:
+            is_home_game = 1
+            opponent_id = away_team_id
+            break
+        elif team_id == away_team_id:
+            is_home_game = 0
+            opponent_id = home_team_id
+            break
+            
+    if not opponent_id:
+        return {"error": "Player's team does not have a game scheduled for today."}
+        
+    opponent_name = next((t['full_name'] for t in all_teams_list if t['id'] == opponent_id), None)
+    
+    return {
+        "OPPONENT": opponent_name,
+        "HOME_GAME": is_home_game,
+        "DAYS_REST": days_rest
+    }
 
 # --- Endpoint to provide player list to front-end ---
 @app.route('/players', methods=['GET'])
@@ -56,9 +96,8 @@ def get_players():
     formatted_players = [{'id': str(p['id']), 'fullName': p['full_name']} for p in all_players_list if p['is_active']]
     return jsonify(formatted_players)
 
-
+# --- Main Prediction Logic ---
 def get_player_prediction(player_name, stat_to_check):
-    # --- FIX: Define this dictionary at the top level of the function ---
     team_name_replacements = {
         "Charlotte Bobcats": "Charlotte Hornets",
         "Seattle SuperSonics": "Oklahoma City Thunder",
@@ -67,22 +106,33 @@ def get_player_prediction(player_name, stat_to_check):
         "New Orleans Hornets": "New Orleans Pelicans"
     }
     
-    # This function handles all feature engineering.
     def feature_engineer(df):
         df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"])
-        df = df.sort_values(by="GAME_DATE")
+        df = df.sort_values(by="GAME_DATE").reset_index(drop=True)
+        
+        # Base Lags and Rolling
         df['PTS_lag1'] = df['PTS'].shift(1)
         df['AST_lag1'] = df['AST'].shift(1)
         df['REB_lag1'] = df['REB'].shift(1)
-        df["Rolling_PTS"] = df["PTS"].rolling(window=3, min_periods=1).mean()
-        df["Rolling_AST"] = df["AST"].rolling(window=3, min_periods=1).mean()
-        df["Rolling_REB"] = df["REB"].rolling(window=3, min_periods=1).mean()
+        df['MIN_lag1'] = df['MIN'].shift(1)
+        df['FGA_lag1'] = df['FGA'].shift(1)
+
+        for col in ['PTS', 'AST', 'REB', 'MIN', 'FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'STL', 'BLK', 'TO']:
+            df[f'Rolling_{col}'] = df[col].shift(1).rolling(window=3, min_periods=1).mean()
+        
         df['HOME_GAME'] = df['MATCHUP'].apply(lambda x: 1 if isinstance(x, str) and "vs." in x else 0)
-        df['Back_to_Back'] = df['GAME_DATE'].diff().dt.days.fillna(0).apply(lambda x: 1 if x == 1 else 0)
+        df['Weighted_PTS_Form'] = df['PTS'].shift(1).ewm(span=5, adjust=False).mean()
+        df['PTS_Variance_5g'] = df['PTS'].shift(1).rolling(window=5, min_periods=1).std().fillna(0)
+        
+        df['Home_Advantage_Multiplier'] = df['HOME_GAME'] * df['Rolling_PTS']
+        
+        # Advanced Fatigue
+        df['Days_Rest'] = df['GAME_DATE'].diff().dt.days.fillna(2)
+        df['Is_Fatigued'] = df['Days_Rest'].apply(lambda x: 1 if x <= 1 else 0)
+        df['Is_Well_Rested'] = df['Days_Rest'].apply(lambda x: 1 if x >= 3 else 0)
 
         def extract_opponent(matchup):
-            if not isinstance(matchup, str):
-                return None
+            if not isinstance(matchup, str): return None
             try:
                 part = matchup.split("vs. ")[1] if "vs." in matchup else matchup.split("@ ")[1]
                 return team_abbrev_to_name.get(part, part)
@@ -94,6 +144,7 @@ def get_player_prediction(player_name, stat_to_check):
             return f"{year}-{str(year + 1)[-2:]}"
         df["SEASON_ID"] = df["SEASON_ID"].apply(convert_season_id)
 
+        # Merge Opponent Defensive Ratings
         def_ratings = all_defensive_ratings.copy()
         def_ratings.rename(columns={"SEASON": "SEASON_ID"}, inplace=True)
         def_stats = def_ratings[['TEAM_NAME', 'SEASON_ID', 'E_DEF_RATING']]
@@ -104,6 +155,7 @@ def get_player_prediction(player_name, stat_to_check):
         df.rename(columns={"E_DEF_RATING": "OPP_E_DEF_RATING"}, inplace=True)
         if "TEAM_NAME_y" in df.columns: df = df.drop(columns=["TEAM_NAME_y"])
 
+        # Merge Opponent Team Stats
         team_stats_df = all_team_stats.copy()
         team_stats_df.rename(columns={"YEAR": "SEASON_ID", "STL": "TEAM_STL", "BLK": "TEAM_BLK", "WIN_PCT": "TEAM_WIN_PCT"}, inplace=True)
         opp_team_stats = team_stats_df[['TEAM_NAME', 'SEASON_ID', 'TEAM_STL', 'TEAM_BLK', 'TEAM_WIN_PCT']]
@@ -116,14 +168,17 @@ def get_player_prediction(player_name, stat_to_check):
         df = df.ffill().bfill()
         return df
 
-    # Check Cache First
-    if stat_to_check in SESSION_MODELS:
-        model = SESSION_MODELS[stat_to_check]
-        scaler = SESSION_SCALERS[stat_to_check]
+    player_id = player_dict.get(player_name.upper())
+    if not player_id: return {"error": "Player not found."}
+    
+    # FIXED: Unique Cache Key
+    cache_key = f"{player_id}_{stat_to_check}"
+
+    if cache_key in SESSION_MODELS:
+        model = SESSION_MODELS[cache_key]
+        scaler = SESSION_SCALERS[cache_key]
     else:
-        print(f"No cached model for {stat_to_check}. Training a new one...")
-        player_id = player_dict.get(player_name.upper())
-        if not player_id: return {"error": "Player not found."}
+        print(f"No cached model for {player_name} - {stat_to_check}. Training XGBoost...")
             
         gamefinder = leaguegamefinder.LeagueGameFinder(player_id_nullable=player_id)
         games = gamefinder.get_dict()['resultSets'][0]['rowSet']
@@ -136,34 +191,24 @@ def get_player_prediction(player_name, stat_to_check):
         if data.empty: return {"error": "Not enough complete data for training."}
 
         target = stat_to_check.upper()
+        if target not in data.columns: return {"error": f"Stat '{target}' not found in data."}
+        
         X_train = data[FEATURES_LIST]
         y_train = data[target]
 
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
         
-        from tensorflow.keras.models import Sequential
-        from tensorflow.keras.layers import Dense, Dropout, BatchNormalization, LeakyReLU
-        from tensorflow.keras.regularizers import l2
-        
-        model = Sequential([
-            Dense(128, input_shape=(X_train_scaled.shape[1],), kernel_regularizer=l2(0.01)), BatchNormalization(), LeakyReLU(), Dropout(0.3),
-            Dense(64, kernel_regularizer=l2(0.01)), BatchNormalization(), LeakyReLU(), Dropout(0.3),
-            Dense(32, kernel_regularizer=l2(0.01)), BatchNormalization(), LeakyReLU(), Dropout(0.2),
-            Dense(1)
-        ])
-        model.compile(optimizer='adam', loss='mae')
+        model = xgb.XGBRegressor(n_estimators=100, learning_rate=0.05, max_depth=3)
         
         print(f"Training in progress...")
-        model.fit(X_train_scaled, y_train, epochs=75, batch_size=16, verbose=0)
+        model.fit(X_train_scaled, y_train, verbose=False)
+        
         print("Training complete. Caching model.")
-        SESSION_MODELS[stat_to_check] = model
-        SESSION_SCALERS[stat_to_check] = scaler
+        SESSION_MODELS[cache_key] = model
+        SESSION_SCALERS[cache_key] = scaler
 
     # --- Prediction Step ---
-    player_id = player_dict.get(player_name.upper())
-    if not player_id: return {"error": "Player not found."}
-
     gamefinder = leaguegamefinder.LeagueGameFinder(player_id_nullable=player_id)
     games = gamefinder.get_dict()['resultSets'][0]['rowSet']
     if not games: return {"error": "No recent game data found."}
@@ -171,12 +216,53 @@ def get_player_prediction(player_name, stat_to_check):
     prediction_data = pd.DataFrame(games, columns=CORRECT_COLUMNS)
     prediction_data = feature_engineer(prediction_data)
     
-    next_game_features = prediction_data[FEATURES_LIST].iloc[-7:].mean().values.reshape(1, -1)
+    # Fetch Tonight's Reality
+    player_team_id = prediction_data['TEAM_ID'].iloc[-1]
+    last_played_date = prediction_data['GAME_DATE'].iloc[-1]
+    
+    tonight = get_tonights_context(player_team_id, last_played_date)
+    if "error" in tonight:
+        return {"error": tonight["error"]}
+        
+    # Grab current form from their LAST game
+    current_form = prediction_data.iloc[-1].copy()
+    
+    # Overwrite historical context with TONIGHT'S context
+    current_form['HOME_GAME'] = tonight['HOME_GAME']
+    current_form['Days_Rest'] = tonight['DAYS_REST']
+    current_form['Is_Fatigued'] = 1 if tonight['DAYS_REST'] <= 1 else 0
+    current_form['Is_Well_Rested'] = 1 if tonight['DAYS_REST'] >= 3 else 0
+    current_form['Home_Advantage_Multiplier'] = tonight['HOME_GAME'] * current_form['Rolling_PTS']
+    
+    opp_def = all_defensive_ratings[all_defensive_ratings['TEAM_NAME'] == tonight['OPPONENT']]
+    if not opp_def.empty:
+        latest_opp_def = opp_def.iloc[-1]
+        current_form['OPP_E_DEF_RATING'] = latest_opp_def['E_DEF_RATING']
+
+    opp_stats = all_team_stats[all_team_stats['TEAM_NAME'] == tonight['OPPONENT']]
+    if not opp_stats.empty:
+        latest_opp_stats = opp_stats.iloc[-1]
+        current_form['OPP_TEAM_STL'] = latest_opp_stats['STL']
+        current_form['OPP_TEAM_BLK'] = latest_opp_stats['BLK']
+        current_form['OPP_TEAM_WIN_PCT'] = latest_opp_stats['WIN_PCT']
+    
+    # Format, Scale, and Predict
+    next_game_features = current_form[FEATURES_LIST].values.reshape(1, -1)
     next_game_features = np.nan_to_num(next_game_features)
     next_game_features_scaled = scaler.transform(next_game_features)
-    predicted_stat = model.predict(next_game_features_scaled)[0][0]
+    
+    predicted_stat = float(model.predict(next_game_features_scaled)[0])
+    
+    # Floor negative predictions at 0 (can't score -2 points)
+    predicted_stat = max(0, predicted_stat)
 
-    return {"playerName": player_name, "statName": stat_to_check, "predictedValue": f"{predicted_stat:.2f}"}
+    return {
+        "playerName": player_name, 
+        "statName": stat_to_check, 
+        "predictedValue": f"{predicted_stat:.2f}",
+        "opponent": tonight['OPPONENT'],
+        "homeGame": bool(tonight['HOME_GAME'])
+    }
 
 @app.route('/predict', methods=['GET'])
 def predict():
