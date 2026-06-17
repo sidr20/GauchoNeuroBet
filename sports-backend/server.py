@@ -11,9 +11,10 @@ from nba_api.stats.static import players, teams
 from nba_api.stats.endpoints import leaguegamefinder, scoreboardv3
 from datetime import datetime
 import warnings
+from flask import send_from_directory
 
 # --- Important backend setup ---
-app = Flask(__name__)
+app = Flask(__name__, static_folder='build', static_url_path='/')
 CORS(app)
 
 # --- In-Memory Cache for Models and Scalers ---
@@ -274,5 +275,16 @@ def predict():
     print(f"Prediction result: {prediction_result}")
     return jsonify(prediction_result)
 
+
+# --- Frontend Routes ---
+@app.route('/')
+def serve():
+    return send_from_directory(app.static_folder, 'index.html')
+
+# This catches any other React routes and prevents 404s when users refresh the page
+@app.errorhandler(404)
+def not_found(e):
+    return send_from_directory(app.static_folder, 'index.html')
+    
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
