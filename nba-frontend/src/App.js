@@ -29,7 +29,7 @@ export default function App() {
     useEffect(() => {
         const fetchAllPlayers = async () => {
             try {
-                const response = await fetch('http://127.0.0.1:5000/players');
+                const response = await fetch('/players');
                 const playersList = await response.json();
                 setAllPlayers(playersList);
                 console.log(`Loaded ${playersList.length} active players.`);
