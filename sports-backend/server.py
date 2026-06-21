@@ -13,8 +13,10 @@ from datetime import datetime
 import warnings
 from flask import send_from_directory
 
-# --- Important backend setup ---
-app = Flask(__name__, static_folder='build', static_url_path='/')
+import os
+backend_dir = os.path.abspath(os.path.dirname(__file__))
+build_dir = os.path.join(backend_dir, 'build')
+app = Flask(__name__, static_folder=build_dir, static_url_path='/')
 CORS(app)
 
 # --- In-Memory Cache for Models and Scalers ---
