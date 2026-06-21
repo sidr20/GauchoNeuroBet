@@ -5,7 +5,7 @@ set -o errexit
 echo "Building frontend..."
 cd nba-frontend
 npm install
-npm run build
+CI=false npm run build
 cd ..
 
 echo "Copying frontend build to backend..."
