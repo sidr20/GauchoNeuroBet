@@ -4,7 +4,7 @@ import logo from './logo.svg';
 
 // This function is the CORE of the front-end to back-end connection
 const getPrediction = async (player, stat) => {
-    const endpoint = `http://127.0.0.1:5000/predict?player=${encodeURIComponent(player.fullName)}&stat=${stat}`;
+    const endpoint = `/predict?player=${encodeURIComponent(player.fullName)}&stat=${stat}`;
     console.log(`Fetching from: ${endpoint}`);
     const response = await fetch(endpoint);
     if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
